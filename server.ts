@@ -5,7 +5,7 @@
 
 import express from "express";
 import path from "path";
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI, Type, GenerateContentParameters } from "@google/genai";
 import dotenv from "dotenv";
 
 // Load environment variables
@@ -39,35 +39,53 @@ function getAiClient() {
   return ai;
 }
 
-// Helper: Call Gemini API with Retry (exponential backoff) for resilience
-async function callGeminiWithRetry<T>(
-  fn: () => Promise<T>,
+// Helper: Call Gemini API with model fallback and exponential backoff for extreme resilience
+async function generateGeminiContentWithFallback(
+  params: Omit<GenerateContentParameters, "model">,
   retries = 3,
   delay = 1000
-): Promise<T> {
-  for (let i = 0; i < retries; i++) {
-    try {
-      return await fn();
-    } catch (error: any) {
-      const errMsg = error?.toString() || error?.message || "";
-      const isRateLimitOrUnavailable = 
-        errMsg.includes("503") || 
-        errMsg.includes("UNAVAILABLE") ||
-        errMsg.includes("Resource exhausted") ||
-        errMsg.includes("rate limit") ||
-        errMsg.includes("limit") ||
-        errMsg.includes("429");
-      
-      if (isRateLimitOrUnavailable && i < retries - 1) {
-        console.warn(`Gemini API returned temporary error (attempt ${i + 1}/${retries}). Retrying in ${delay}ms... Error: ${errMsg}`);
-        await new Promise((resolve) => setTimeout(resolve, delay));
-        delay *= 2; // exponential backoff
-      } else {
-        throw error;
+) {
+  const client = getAiClient();
+  const models = ["gemini-3.5-flash", "gemini-2.5-flash"];
+  let lastError: any = null;
+
+  for (const modelName of models) {
+    let currentDelay = delay;
+    for (let i = 0; i < retries; i++) {
+      try {
+        console.log(`Attempting generateContent using model: ${modelName} (attempt ${i + 1}/${retries})`);
+        const response = await client.models.generateContent({
+          ...params,
+          model: modelName,
+        });
+        return response;
+      } catch (error: any) {
+        lastError = error;
+        const errMsg = error?.toString() || error?.message || "";
+        console.warn(`Gemini error using model ${modelName}: ${errMsg}`);
+
+        const isTemporaryError = 
+          errMsg.includes("503") || 
+          errMsg.includes("UNAVAILABLE") ||
+          errMsg.includes("Resource exhausted") ||
+          errMsg.includes("rate limit") ||
+          errMsg.includes("limit") ||
+          errMsg.includes("429");
+
+        if (isTemporaryError && i < retries - 1) {
+          console.warn(`Temporary error. Retrying in ${currentDelay}ms...`);
+          await new Promise((resolve) => setTimeout(resolve, currentDelay));
+          currentDelay *= 2; // exponential backoff
+        } else {
+          // If it's a non-temporary/rate limit error (e.g. key issue, bad parameters) OR we exhausted retries,
+          // break out of this model's retry loop and fall back to the next model immediately
+          break;
+        }
       }
     }
   }
-  throw new Error("Failed to contact Gemini API after multiple retries.");
+
+  throw lastError || new Error("Failed to contact Gemini API after attempting multiple models.");
 }
 
 // Endpoint 1: Generate Poetry
@@ -251,8 +269,7 @@ Return the response in a structured JSON schema representing the composed poem, 
 
 Ensure perfect rhyming (ពាក្យជួនចុងចួន និងចួនឆ្លងល្បះ) as per traditional rules, precise syllable counts per line, and highly accurate classical spelling from the Khmer dictionary. Provide definitions for any poetic or rich vocabulary used.`;
 
-    const response = await callGeminiWithRetry(() => client.models.generateContent({
-      model: "gemini-3.5-flash",
+    const response = await generateGeminiContentWithFallback({
       contents: prompt,
       config: {
         systemInstruction: systemInstruction,
@@ -260,7 +277,7 @@ Ensure perfect rhyming (ពាក្យជួនចុងចួន និងច�
         responseSchema: responseSchema,
         temperature: 0.7,
       }
-    }));
+    });
 
     const parsedData = JSON.parse(response.text || "{}");
     res.json(parsedData);
@@ -375,8 +392,7 @@ ${poemText}
 
 Please parse it stanza by stanza, line by line. Verify if syllables match the requested poetry style, if rhymes connect correctly (including cross-stanza rhymes if multiple stanzas), and check if there are any spelling mistakes. Provide constructive and educational suggestions in Khmer.`;
 
-    const response = await callGeminiWithRetry(() => client.models.generateContent({
-      model: "gemini-3.5-flash",
+    const response = await generateGeminiContentWithFallback({
       contents: prompt,
       config: {
         systemInstruction: systemInstruction,
@@ -384,7 +400,7 @@ Please parse it stanza by stanza, line by line. Verify if syllables match the re
         responseSchema: responseSchema,
         temperature: 0.2, // low temp for accurate analysis
       }
-    }));
+    });
 
     const parsedData = JSON.parse(response.text || "{}");
     res.json(parsedData);
@@ -412,8 +428,7 @@ app.post("/api/rhyme-helper", async (req, res) => {
 
     const client = getAiClient();
 
-    const response = await callGeminiWithRetry(() => client.models.generateContent({
-      model: "gemini-3.5-flash",
+    const response = await generateGeminiContentWithFallback({
       contents: `suggest list of 10-15 traditional Khmer words that rhyme perfectly with the word "${word}". 
 Also, provide a tiny definition for each word so the user knows what they mean, and categorize them by emotional tone or usage (e.g., descriptive, emotional, nature).
 Format the response strictly as a JSON object with this schema:
@@ -428,7 +443,7 @@ Return only JSON. Do not write any markdown outside the JSON.`,
         responseMimeType: "application/json",
         temperature: 0.7
       }
-    }));
+    });
 
     const parsedData = JSON.parse(response.text || "{}");
     res.json(parsedData);
