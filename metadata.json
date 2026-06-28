@@ -1,0 +1,6 @@
+{
+  "name": "កម្មវិធីតែងកំណាព្យខ្មែរ - Khmer Poetry Platform",
+  "description": "An interactive full-stack web application designed for learning, writing, analyzing, and generating traditional Khmer poetry (កំណាព្យខ្មែរ) like Bot Pake 4, 6, 7, Kaka Keti, and Pumnol, ensuring perfect rhyming rules and vocabulary spelling.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
