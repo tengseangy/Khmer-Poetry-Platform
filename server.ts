@@ -39,6 +39,37 @@ function getAiClient() {
   return ai;
 }
 
+// Helper: Call Gemini API with Retry (exponential backoff) for resilience
+async function callGeminiWithRetry<T>(
+  fn: () => Promise<T>,
+  retries = 3,
+  delay = 1000
+): Promise<T> {
+  for (let i = 0; i < retries; i++) {
+    try {
+      return await fn();
+    } catch (error: any) {
+      const errMsg = error?.toString() || error?.message || "";
+      const isRateLimitOrUnavailable = 
+        errMsg.includes("503") || 
+        errMsg.includes("UNAVAILABLE") ||
+        errMsg.includes("Resource exhausted") ||
+        errMsg.includes("rate limit") ||
+        errMsg.includes("limit") ||
+        errMsg.includes("429");
+      
+      if (isRateLimitOrUnavailable && i < retries - 1) {
+        console.warn(`Gemini API returned temporary error (attempt ${i + 1}/${retries}). Retrying in ${delay}ms... Error: ${errMsg}`);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        delay *= 2; // exponential backoff
+      } else {
+        throw error;
+      }
+    }
+  }
+  throw new Error("Failed to contact Gemini API after multiple retries.");
+}
+
 // Endpoint 1: Generate Poetry
 app.post("/api/generate-poem", async (req, res) => {
   try {
@@ -220,7 +251,7 @@ Return the response in a structured JSON schema representing the composed poem, 
 
 Ensure perfect rhyming (ពាក្យជួនចុងចួន និងចួនឆ្លងល្បះ) as per traditional rules, precise syllable counts per line, and highly accurate classical spelling from the Khmer dictionary. Provide definitions for any poetic or rich vocabulary used.`;
 
-    const response = await client.models.generateContent({
+    const response = await callGeminiWithRetry(() => client.models.generateContent({
       model: "gemini-3.5-flash",
       contents: prompt,
       config: {
@@ -229,13 +260,20 @@ Ensure perfect rhyming (ពាក្យជួនចុងចួន និងច�
         responseSchema: responseSchema,
         temperature: 0.7,
       }
-    });
+    }));
 
     const parsedData = JSON.parse(response.text || "{}");
     res.json(parsedData);
   } catch (error: any) {
     console.error("Error generating poem:", error);
-    res.status(500).json({ error: error.message || "Failed to generate poetry." });
+    const errMsg = error?.message || error?.toString() || "";
+    let friendlyMessage = "ការបង្កើតកំណាព្យបានបរាជ័យ។ សូមព្យាយាមម្ដងទៀត។";
+    if (errMsg.includes("503") || errMsg.includes("UNAVAILABLE")) {
+      friendlyMessage = "សេវាកម្មកំពុងមមាញឹកខ្លាំង ឬកំពុងមានការប្រើប្រាស់ខ្ពស់ជាបណ្ដោះអាសន្ន (Spikes in demand)។ សូមរង់ចាំបន្តិច រួចចុចព្យាយាមម្ដងទៀត។";
+    } else if (errMsg.includes("API_KEY") || errMsg.includes("missing")) {
+      friendlyMessage = "សូមពិនិត្យមើលកូដសម្ងាត់ API Key នៅក្នុងការកំណត់ Settings > Secrets។";
+    }
+    res.status(500).json({ error: friendlyMessage, debug: errMsg });
   }
 });
 
@@ -337,7 +375,7 @@ ${poemText}
 
 Please parse it stanza by stanza, line by line. Verify if syllables match the requested poetry style, if rhymes connect correctly (including cross-stanza rhymes if multiple stanzas), and check if there are any spelling mistakes. Provide constructive and educational suggestions in Khmer.`;
 
-    const response = await client.models.generateContent({
+    const response = await callGeminiWithRetry(() => client.models.generateContent({
       model: "gemini-3.5-flash",
       contents: prompt,
       config: {
@@ -346,13 +384,20 @@ Please parse it stanza by stanza, line by line. Verify if syllables match the re
         responseSchema: responseSchema,
         temperature: 0.2, // low temp for accurate analysis
       }
-    });
+    }));
 
     const parsedData = JSON.parse(response.text || "{}");
     res.json(parsedData);
   } catch (error: any) {
     console.error("Error analyzing poem:", error);
-    res.status(500).json({ error: error.message || "Failed to analyze poetry." });
+    const errMsg = error?.message || error?.toString() || "";
+    let friendlyMessage = "ការវិភាគកំណាព្យបានបរាជ័យ។ សូមព្យាយាមម្ដងទៀត។";
+    if (errMsg.includes("503") || errMsg.includes("UNAVAILABLE")) {
+      friendlyMessage = "សេវាកម្មកំពុងមមាញឹកខ្លាំង ឬកំពុងមានការប្រើប្រាស់ខ្ពស់ជាបណ្ដោះអាសន្ន (Spikes in demand)។ សូមរង់ចាំបន្តិច រួចចុចព្យាយាមម្ដងទៀត។";
+    } else if (errMsg.includes("API_KEY") || errMsg.includes("missing")) {
+      friendlyMessage = "សូមពិនិត្យមើលកូដសម្ងាត់ API Key នៅក្នុងការកំណត់ Settings > Secrets។";
+    }
+    res.status(500).json({ error: friendlyMessage, debug: errMsg });
   }
 });
 
@@ -367,7 +412,7 @@ app.post("/api/rhyme-helper", async (req, res) => {
 
     const client = getAiClient();
 
-    const response = await client.models.generateContent({
+    const response = await callGeminiWithRetry(() => client.models.generateContent({
       model: "gemini-3.5-flash",
       contents: `suggest list of 10-15 traditional Khmer words that rhyme perfectly with the word "${word}". 
 Also, provide a tiny definition for each word so the user knows what they mean, and categorize them by emotional tone or usage (e.g., descriptive, emotional, nature).
@@ -383,13 +428,20 @@ Return only JSON. Do not write any markdown outside the JSON.`,
         responseMimeType: "application/json",
         temperature: 0.7
       }
-    });
+    }));
 
     const parsedData = JSON.parse(response.text || "{}");
     res.json(parsedData);
   } catch (error: any) {
     console.error("Error in rhyme helper:", error);
-    res.status(500).json({ error: error.message || "Failed to fetch rhyme suggestions." });
+    const errMsg = error?.message || error?.toString() || "";
+    let friendlyMessage = "ការស្វែងរកពាក្យជួនបានបរាជ័យ។ សូមព្យាយាមម្ដងទៀត។";
+    if (errMsg.includes("503") || errMsg.includes("UNAVAILABLE")) {
+      friendlyMessage = "សេវាកម្មកំពុងមមាញឹកខ្លាំង ឬកំពុងមានការប្រើប្រាស់ខ្ពស់ជាបណ្ដោះអាសន្ន (Spikes in demand)។ សូមរង់ចាំបន្តិច រួចចុចព្យាយាមម្ដងទៀត។";
+    } else if (errMsg.includes("API_KEY") || errMsg.includes("missing")) {
+      friendlyMessage = "សូមពិនិត្យមើលកូដសម្ងាត់ API Key នៅក្នុងការកំណត់ Settings > Secrets។";
+    }
+    res.status(500).json({ error: friendlyMessage, debug: errMsg });
   }
 });
 
